@@ -8,6 +8,7 @@
     name:
       - ca-certificates
       - curl
+      - gnupg
       - python3-docker
       - python3-requests
     state: present
