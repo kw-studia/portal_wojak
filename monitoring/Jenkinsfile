@@ -1,0 +1,70 @@
+// Potok monitorujący monitoring_wojak – potok skryptowy (scripted pipeline), uruchamiany co 15 minut.
+
+properties([
+    pipelineTriggers([cron('H/15 * * * *')]),
+    disableConcurrentBuilds(),
+    buildDiscarder(logRotator(numToKeepStr: '200'))
+])
+
+def IP_PROD = '192.168.56.54'
+def NAZWA_PORTALU = 'www.wojak.lan'
+
+node('agent_wojak') {
+    def bledy = []
+
+    stage('Portal na PROD (adres IP)') {
+        // Sprawdzenie po adresie IP pozwala odróżnić awarię portalu od awarii rozwiązywania nazw
+        sprawdz(bledy, "Portal PROD: GET http://${IP_PROD}/ zwraca kod 200") {
+            kodHttp("http://${IP_PROD}/") == '200'
+        }
+        sprawdz(bledy, "Portal PROD: GET http://${IP_PROD}/health zwraca OK") {
+            pobierz("http://${IP_PROD}/health") == 'OK'
+        }
+    }
+
+    stage('Serwer DNS na PROD') {
+        sprawdz(bledy, "BIND PROD: rekord A ${NAZWA_PORTALU} = ${IP_PROD}") {
+            zapytanieDns(IP_PROD, NAZWA_PORTALU) == IP_PROD
+        }
+    }
+
+    stage('Wynik') {
+        if (bledy) {
+            mail(to: env.EMAIL_POWIADOMIEN,
+                 subject: "[Jenkins] ALARM monitoringu WojakNet: nieudane sprawdzenia (${bledy.size()})",
+                 body: "Potok ${env.JOB_NAME} #${env.BUILD_NUMBER} wykrył nieudane sprawdzenia platformy produkcyjnej:\n\n" +
+                       bledy.collect { "- ${it}" }.join('\n') +
+                       "\n\nLogi: ${env.BUILD_URL}console\n")
+            error("Nieudane sprawdzenia: ${bledy.join('; ')}")
+        }
+        echo 'Wszystkie sprawdzenia zakończone sukcesem'
+    }
+}
+
+// Wykonuje jedno sprawdzenie; błąd polecenia (np. brak połączenia) też oznacza nieudane sprawdzenie
+def sprawdz(List bledy, String opis, Closure test) {
+    def wynik = false
+    try {
+        wynik = test()
+    } catch (err) {
+        echo "Błąd podczas sprawdzenia: ${err.message}"
+    }
+    if (wynik) {
+        echo "OK    ${opis}"
+    } else {
+        echo "BŁĄD  ${opis}"
+        bledy << opis
+    }
+}
+
+def kodHttp(String url) {
+    return sh(returnStdout: true, script: "curl -s -o /dev/null -m 10 -w '%{http_code}' ${url}").trim()
+}
+
+def pobierz(String url) {
+    return sh(returnStdout: true, script: "curl -fsS -m 10 ${url}").trim()
+}
+
+def zapytanieDns(String serwer, String nazwa) {
+    return sh(returnStdout: true, script: "dig +short +time=3 +tries=2 @${serwer} ${nazwa} A").trim()
+}
