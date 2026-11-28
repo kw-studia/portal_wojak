@@ -19,6 +19,7 @@ pipeline {
         disableConcurrentBuilds()    // blokada jednoczesnych przebiegów (i wdrożeń)
         skipDefaultCheckout()        // kod pobiera jawny etap „Pobranie kodu”
         timestamps()
+        copyArtifactPermission('portal_wojak')   // zgoda na kopiowanie paczek tego zadania (ścieżka PROD)
     }
 
     environment {
@@ -86,6 +87,55 @@ pipeline {
                 archiveArtifacts artifacts: "paczka/${env.PACZKA}", fingerprint: true
             }
         }
+
+        stage('Pobranie paczki') {
+            when { expression { params.SRODOWISKO == 'PROD' } }
+            steps {
+                script {
+                    if (!(params.WERSJA ==~ /\d+/)) {
+                        error("Parametr WERSJA musi być numerem budowania (podano: '${params.WERSJA}')")
+                    }
+                }
+                sh 'rm -rf promocja'
+                // Brak paczki (budowanie nieudane, nieistniejące lub z PROD) przerywa potok
+                copyArtifacts(projectName: env.JOB_NAME, selector: specific(params.WERSJA),
+                              filter: 'paczka/*.tar.gz', target: 'promocja', flatten: true,
+                              fingerprintArtifacts: true)
+                rozpakujPaczke("promocja/portal_wojak-b${params.WERSJA}.tar.gz")
+                script {
+                    def wersja = readJSON file: 'wdrozenie/strona/version.json'
+                    env.PACZKA_COMMIT = wersja.commit
+                    env.PACZKA_DATA = wersja.data
+                }
+                echo "Paczka z budowania #${params.WERSJA}: commit ${env.PACZKA_COMMIT}, zbudowana ${env.PACZKA_DATA}"
+            }
+        }
+
+        stage('Zatwierdzenie') {
+            when { expression { params.SRODOWISKO == 'PROD' } }
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(message: "Wdrożyć na PROD paczkę z budowania #${params.WERSJA} " +
+                                   "(commit ${env.PACZKA_COMMIT}, zbudowana ${env.PACZKA_DATA})?",
+                          ok: 'Wdróż na PROD')
+                }
+            }
+        }
+
+        stage('Wdrożenie na PROD') {
+            when { expression { params.SRODOWISKO == 'PROD' } }
+            steps {
+                // Ta sama paczka, która przeszła testy na TEST – bez ponownego budowania
+                wdrozPaczke('prod')
+            }
+        }
+
+        stage('Test na PROD') {
+            when { expression { params.SRODOWISKO == 'PROD' } }
+            steps {
+                testPortalu("http://${env.IP_PROD}", 'PROD', params.WERSJA)
+            }
+        }
     }
 
     post {
@@ -97,6 +147,7 @@ pipeline {
 Zadanie: ${env.JOB_NAME}
 Numer budowania: ${env.BUILD_NUMBER}
 Środowisko: ${params.SRODOWISKO}
+Parametr WERSJA: ${params.WERSJA ?: '-'}
 Logi: ${env.BUILD_URL}console
 """)
         }
